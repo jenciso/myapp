@@ -1,0 +1,99 @@
+variables:
+  APP_NAME: myapp
+  APP_LABEL: myapp
+  APP_HOST: myapp.paas-lab.docs-planet.site
+
+stages:
+  - build
+  - deploy
+
+build:
+  stage: build
+  image: docker:stable
+  services:
+    - docker:dind
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_IMAGE_TAG: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+    - docker info
+    - export
+  script:
+    - docker build . -t ${DOCKER_IMAGE_TAG}
+    - docker push ${DOCKER_IMAGE_TAG}
+
+deploy-prd:
+  stage: deploy
+  image: jenciso/kubectl
+  variables:
+    DOCKER_IMAGE_TAG: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}
+    DEPLOY_HOST: ${APP_HOST}
+  environment:
+    name: production
+    url: http://$DEPLOY_HOST
+  before_script:
+    - echo "Setting kubectl"
+    - mkdir ~/.kube && echo "${KUBECONFIG_DEPLOY}" | base64 -d > ~/.kube/config
+    - kubectl delete --ignore-not-found=true secret gitlab-auth
+    - export REGISTRY_URL=`echo ${CI_REGISTRY} | cut -d':' -f1`
+    - kubectl create secret docker-registry gitlab-auth --docker-server=${REGISTRY_URL} --docker-username=${CI_REGISTRY_USER} --docker-password=${CI_REGISTRY_PASSWORD}
+  script:
+    - echo "Applying yaml files"
+    - envsubst < ./k8s/deploy.yml | kubectl apply -f -
+  after_script:
+    - echo "Delete kubectl credentials"
+    - rm -rf ~/.kube/config
+  when: manual
+  only:
+    - master
+
+deploy-review:
+  stage: deploy
+  environment:
+    name: review/$CI_COMMIT_REF_NAME
+    url: http://$CI_COMMIT_REF_SLUG-$DEPLOY_HOST
+    on_stop: stop_review
+  variables:
+    APP_NAME: ${CI_ENVIRONMENT_SLUG}-${CI_PROJECT_NAME}
+    APP_LABEL: ${CI_ENVIRONMENT_SLUG}
+    DEPLOY_HOST: ${CI_COMMIT_REF_SLUG}-${APP_HOST}
+    DOCKER_IMAGE_TAG: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}
+  image: jenciso/kubectl
+  before_script:
+    - echo "Setting kubectl"
+    - mkdir ~/.kube && echo "${KUBECONFIG_DEPLOY}" | base64 -d > ~/.kube/config
+    - kubectl delete --ignore-not-found=true secret gitlab-auth
+    - export REGISTRY_URL=`echo ${CI_REGISTRY} | cut -d':' -f1`
+    - kubectl create secret docker-registry gitlab-auth --docker-server=${REGISTRY_URL} --docker-username=${CI_REGISTRY_USER} --docker-password=${CI_REGISTRY_PASSWORD}
+  script:
+    - export
+    - echo "Applying yaml files"
+    - envsubst < ./k8s/deploy.yml | kubectl apply -f -
+  after_script:
+    - echo "Delete kubectl credentials"
+    - rm -rf ~/.kube/config
+  only:
+    - branches
+  except:
+    - master
+
+stop_review:
+  stage: deploy
+  environment:
+    name: review/$CI_COMMIT_REF_NAME
+    action: stop
+  variables:
+    APP_NAME: ${CI_ENVIRONMENT_SLUG}-${CI_PROJECT_NAME}
+    GIT_STRATEGY: none
+  image: jenciso/kubectl
+  before_script:
+    - echo "Setting kubectl"
+    - mkdir ~/.kube && echo "${KUBECONFIG_DEPLOY}" | base64 -d > ~/.kube/config
+  script:
+    - kubectl delete service/${APP_NAME}
+    - kubectl delete deploy/${APP_NAME}
+    - kubectl delete ingress/${APP_NAME}
+  when: manual
+  except:
+    - master
